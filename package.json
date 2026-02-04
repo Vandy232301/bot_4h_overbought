@@ -1,0 +1,16 @@
+{
+  "name": "dynasty-rsi-bot-node",
+  "version": "1.0.0",
+  "description": "DYNASTY Overbought RSI Bot (Node.js port) for Bybit with Discord alerts",
+  "main": "bot.js",
+  "type": "module",
+  "scripts": {
+    "start": "node bot.js"
+  },
+  "dependencies": {
+    "axios": "^1.7.7",
+    "dotenv": "^16.4.5",
+    "ws": "^8.18.0"
+  }
+}
+
