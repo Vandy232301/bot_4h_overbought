@@ -38,6 +38,33 @@ export class BybitClient {
     }
   }
 
+  /**
+   * Get all linear tickers (used to pre-filter by volume and open interest)
+   * This hits the /v5/market/tickers endpoint ONCE and we reuse the data.
+   */
+  async getAllLinearTickers() {
+    try {
+      const data = await this._get('/v5/market/tickers', {
+        category: 'linear',
+      });
+      if (data.retCode !== 0) return {};
+      const list = data.result?.list ?? [];
+      const map = {};
+      for (const t of list) {
+        const sym = t.symbol;
+        if (!sym) continue;
+        map[sym] = {
+          volume24h: Number(t.turnover24h ?? 0),
+          openInterest: Number(t.openInterestValue ?? 0),
+        };
+      }
+      return map;
+    } catch (err) {
+      console.error('❌ Error fetching all linear tickers:', err.message ?? err);
+      return {};
+    }
+  }
+
   async getKlines(symbol, interval = '240', limit = 200) {
     if (!symbol || !String(symbol).trim()) return [];
     const retries = 3;

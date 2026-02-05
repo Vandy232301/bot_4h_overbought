@@ -10,6 +10,7 @@ import {
 import { BybitClient } from './bybitClient.js';
 import { RSICalculator } from './rsiCalculator.js';
 import { DiscordAlert } from './discordAlert.js';
+import { AlertTracker } from './alertTracker.js';
 
 const timeframeMap = {
   '4h': '240',
@@ -23,6 +24,7 @@ class OverboughtBotNode {
     this.bybit = new BybitClient({ testnet: false });
     this.rsiCalc = new RSICalculator(RSI_PERIOD);
     this.discord = new DiscordAlert();
+    this.alertTracker = new AlertTracker();
 
     this.symbolData = {}; // symbol -> timeframe -> { candles, lastCheck }
     this.alerted = {
@@ -34,6 +36,7 @@ class OverboughtBotNode {
     };
     this.lastRsi = {}; // symbol -> timeframe -> rsi
     this.running = false;
+    this.activeAlerts = new Map(); // alertId -> { symbol, timeframe, alert }
   }
 
   async initSymbols() {
@@ -44,9 +47,31 @@ class OverboughtBotNode {
       return false;
     }
 
-    // blacklist
+    // Apply blacklist first
     symbols = symbols.filter((s) => !BLACKLISTED_SYMBOLS.includes(s));
-    console.log(`✅ Found ${symbols.length} symbols. Initializing ${TIMEFRAMES.join(', ')}...`);
+
+    // Prefilter by liquidity (24h volume & open interest) using a SINGLE tickers call
+    const tickerMap = await this.bybit.getAllLinearTickers();
+    if (tickerMap && Object.keys(tickerMap).length > 0) {
+      const before = symbols.length;
+      symbols = symbols.filter((s) => {
+        const t = tickerMap[s];
+        if (!t) return false;
+        const volOk = t.volume24h >= MIN_VOLUME_24H;
+        const oiOk = t.openInterest >= MIN_OPEN_INTEREST;
+        return volOk && oiOk;
+      });
+      const removed = before - symbols.length;
+      console.log(
+        `🧮 Liquidity filter: kept ${symbols.length} symbols (removed ${removed} below volume/OI thresholds)`,
+      );
+    } else {
+      console.log(
+        '⚠️ Could not fetch global tickers for liquidity filter; falling back to all symbols (filters will still apply before alerts).',
+      );
+    }
+
+    console.log(`✅ Monitoring ${symbols.length} liquid symbols on timeframes ${TIMEFRAMES.join(', ')}...`);
 
     for (const sym of symbols) {
       if (!sym) continue;
@@ -162,11 +187,28 @@ class OverboughtBotNode {
       if (oi != null && oi < MIN_OPEN_INTEREST) return;
 
       const funding = await this.bybit.getFundingRate(symbol);
+      const currentPrice = candles[candles.length - 1].close;
+      
       console.log(
-        `🚨 ALERT: ${symbol} RSI=${rsi} on ${timeframe}, Vol24h=${volume24h}, OI=${oi}`,
+        `🚨 ALERT: ${symbol} RSI=${rsi} on ${timeframe}, Price=${currentPrice}, Vol24h=${volume24h}, OI=${oi}`,
       );
+      
       const ok = await this.discord.sendAlert(symbol, rsi, timeframe, funding, 'SHORT');
-      if (ok) set.add(symbol);
+      if (ok) {
+        set.add(symbol);
+        // Track alert for success rate calculation
+        const alert = this.alertTracker.recordAlert(
+          symbol,
+          rsi,
+          timeframe,
+          currentPrice,
+          funding,
+        );
+        this.activeAlerts.set(alert.id, { symbol, timeframe, alert });
+        console.log(
+          `📊 Tracking alert ${alert.id}: Target -1% = ${alert.targetPrice} (from ${currentPrice})`,
+        );
+      }
 
       await this.checkMultiTimeframe(symbol);
     } else if (rsi >= RSI_THRESHOLD - 10) {
@@ -212,6 +254,9 @@ class OverboughtBotNode {
     }
 
     const funding = await this.bybit.getFundingRate(symbol);
+    const candles1m = sd['1m'].candles;
+    const currentPrice = candles1m[candles1m.length - 1].close;
+    
     const ok = await this.discord.sendMultiTimeframeAlert(
       symbol,
       rsi1m,
@@ -220,12 +265,30 @@ class OverboughtBotNode {
       funding,
       'SHORT',
     );
-    if (ok) set.add(symbol);
+    if (ok) {
+      set.add(symbol);
+      // Track multi-timeframe alert
+      const alert = this.alertTracker.recordAlert(
+        symbol,
+        rsi1m,
+        `multi-${pair}`,
+        currentPrice,
+        funding,
+      );
+      this.activeAlerts.set(alert.id, { symbol, timeframe: `multi-${pair}`, alert });
+      console.log(
+        `📊 Tracking multi-TF alert ${alert.id}: Target -1% = ${alert.targetPrice} (from ${currentPrice})`,
+      );
+    }
   }
 
   async periodicCheck() {
     const now = Date.now() / 1000;
     let checked = 0;
+    
+    // Update prices for active alerts
+    await this.updateActiveAlerts();
+    
     for (const [symbol, tfData] of Object.entries(this.symbolData)) {
       if (BLACKLISTED_SYMBOLS.includes(symbol)) continue;
       for (const tf of TIMEFRAMES) {
@@ -255,6 +318,30 @@ class OverboughtBotNode {
       }
     }
     console.log(`✅ Periodic check completed: ${checked} symbol-timeframe combinations checked`);
+  }
+
+  async updateActiveAlerts() {
+    // Update prices for pending alerts
+    const pendingAlerts = Array.from(this.activeAlerts.values()).filter(
+      (a) => a.alert.status === 'pending',
+    );
+
+    for (const { symbol, alert } of pendingAlerts) {
+      try {
+        const ticker = await this.bybit.getTicker(symbol);
+        if (ticker && ticker.lastPrice) {
+          const currentPrice = Number(ticker.lastPrice);
+          this.alertTracker.updatePrice(alert.id, currentPrice);
+
+          // Remove from active if completed
+          if (alert.status !== 'pending') {
+            this.activeAlerts.delete(alert.id);
+          }
+        }
+      } catch (err) {
+        // Silent fail - will retry next time
+      }
+    }
   }
 
   async start() {

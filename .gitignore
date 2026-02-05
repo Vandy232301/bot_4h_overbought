@@ -13,6 +13,9 @@ yarn-error.log*
 *.log
 bot.log
 
+# Alert tracking
+alerts_history.json
+
 # IDE
 .vscode/
 .idea/

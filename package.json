@@ -5,7 +5,8 @@
   "main": "bot.js",
   "type": "module",
   "scripts": {
-    "start": "node bot.js"
+    "start": "node bot.js",
+    "stats": "node showStats.js"
   },
   "dependencies": {
     "axios": "^1.7.7",
